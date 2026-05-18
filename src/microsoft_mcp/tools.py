@@ -1,5 +1,6 @@
 import base64
 import datetime as dt
+import json
 import pathlib as pl
 from typing import Any
 from fastmcp import FastMCP
@@ -18,6 +19,19 @@ FOLDERS = {
         "archive": "archive",
     }.items()
 }
+
+ALLOWED_DOWNLOAD_DIR = pl.Path.home() / "Downloads" / "mcp"
+
+
+def _validate_save_path(save_path: str) -> pl.Path:
+    """Validate that save_path is within the allowed download directory."""
+    path = pl.Path(save_path).expanduser().resolve()
+    allowed = ALLOWED_DOWNLOAD_DIR.resolve()
+    if not path.is_relative_to(allowed):
+        raise ValueError(
+            f"Save path must be within {allowed}. Got: {path}"
+        )
+    return path
 
 
 @mcp.tool
@@ -58,7 +72,7 @@ def authenticate_account() -> dict[str, str]:
         "device_code": flow["user_code"],
         "verification_url": verification_url,
         "expires_in": flow.get("expires_in", 900),
-        "_flow_cache": str(flow),
+        "_flow_cache": json.dumps(flow),
     }
 
 
@@ -72,11 +86,9 @@ def complete_authentication(flow_cache: str) -> dict[str, str]:
     Returns:
         Account information if authentication was successful
     """
-    import ast
-
     try:
-        flow = ast.literal_eval(flow_cache)
-    except (ValueError, SyntaxError):
+        flow = json.loads(flow_cache)
+    except (ValueError, json.JSONDecodeError):
         raise ValueError("Invalid flow cache data")
 
     app = auth.get_app()
@@ -747,8 +759,10 @@ def list_files(
 
 @mcp.tool
 def get_file(file_id: str, account_id: str, download_path: str) -> dict[str, Any]:
-    """Download a file from OneDrive to local path"""
-    import subprocess
+    """Download a file from OneDrive to local path (must be within ~/Downloads/mcp/)"""
+    import httpx
+
+    path = _validate_save_path(download_path)
 
     metadata = graph.request("GET", f"/me/drive/items/{file_id}", account_id)
     if not metadata:
@@ -758,21 +772,18 @@ def get_file(file_id: str, account_id: str, download_path: str) -> dict[str, Any
     if not download_url:
         raise ValueError("No download URL available for this file")
 
-    try:
-        subprocess.run(
-            ["curl", "-L", "-o", download_path, download_url],
-            check=True,
-            capture_output=True,
-        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with httpx.Client(timeout=120.0, follow_redirects=True) as client:
+        response = client.get(download_url)
+        response.raise_for_status()
+        path.write_bytes(response.content)
 
-        return {
-            "path": download_path,
-            "name": metadata.get("name", "unknown"),
-            "size_mb": round(metadata.get("size", 0) / (1024 * 1024), 2),
-            "mime_type": metadata.get("file", {}).get("mimeType") if metadata else None,
-        }
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to download file: {e.stderr.decode()}")
+    return {
+        "path": str(path),
+        "name": metadata.get("name", "unknown"),
+        "size_mb": round(metadata.get("size", 0) / (1024 * 1024), 2),
+        "mime_type": metadata.get("file", {}).get("mimeType") if metadata else None,
+    }
 
 
 @mcp.tool
@@ -812,7 +823,9 @@ def delete_file(file_id: str, account_id: str) -> dict[str, str]:
 def get_attachment(
     email_id: str, attachment_id: str, save_path: str, account_id: str
 ) -> dict[str, Any]:
-    """Download email attachment to a specified file path"""
+    """Download email attachment to a specified file path (must be within ~/Downloads/mcp/)"""
+    path = _validate_save_path(save_path)
+
     result = graph.request(
         "GET", f"/me/messages/{email_id}/attachments/{attachment_id}", account_id
     )
@@ -824,7 +837,6 @@ def get_attachment(
         raise ValueError("Attachment content not available")
 
     # Save attachment to file
-    path = pl.Path(save_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     content_bytes = base64.b64decode(result["contentBytes"])
     path.write_bytes(content_bytes)

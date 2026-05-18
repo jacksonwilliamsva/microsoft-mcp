@@ -7,7 +7,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 CACHE_FILE = pl.Path.home() / ".microsoft_mcp_token_cache.json"
-SCOPES = ["https://graph.microsoft.com/.default"]
+SCOPES = [
+    "Mail.ReadWrite",
+    "Calendars.ReadWrite",
+    "Contacts.ReadWrite",
+    "Files.ReadWrite",
+    "People.Read",
+    "User.Read",
+]
 
 
 class Account(NamedTuple):
@@ -25,6 +32,7 @@ def _read_cache() -> str | None:
 def _write_cache(content: str) -> None:
     CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     CACHE_FILE.write_text(content)
+    os.chmod(CACHE_FILE, 0o600)
 
 
 def get_app() -> msal.PublicClientApplication:
